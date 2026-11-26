@@ -26,6 +26,7 @@ h3_config.lo dnl
 h3_filter.lo dnl
 h3_hooks.lo dnl
 h3_io.lo dnl
+h3_replay.lo dnl
 h3_request.lo dnl
 h3_server.lo dnl
 h3_session.lo dnl

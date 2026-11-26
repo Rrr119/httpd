@@ -184,6 +184,8 @@ int h3_status_handler(request_rec* r)
     apr_uint32_t streams = apr_atomic_read32(&child_h3_io->total_streams);
     apr_uint64_t bytes_in = apr_atomic_read64(&child_h3_io->total_bytes_read);
     apr_uint64_t bytes_out = apr_atomic_read64(&child_h3_io->total_bytes_written);
+    h3_replay_stats replay;
+    h3_replay_cache_get_stats(child_h3_io->replay_cache, &replay);
 
     ap_rprintf(r,
                "{\n"
@@ -191,9 +193,21 @@ int h3_status_handler(request_rec* r)
                "  \"total_connections\": %u,\n"
                "  \"total_streams\": %u,\n"
                "  \"total_bytes_read\": %" APR_UINT64_T_FMT ",\n"
-               "  \"total_bytes_written\": %" APR_UINT64_T_FMT "\n"
+               "  \"total_bytes_written\": %" APR_UINT64_T_FMT ",\n"
+               "  \"replay_cache\": {\n"
+               "    \"enabled\": %s,\n"
+               "    \"capacity\": %" APR_SIZE_T_FMT ",\n"
+               "    \"entries\": %" APR_SIZE_T_FMT ",\n"
+               "    \"duplicates\": %" APR_UINT64_T_FMT ",\n"
+               "    \"expired\": %" APR_UINT64_T_FMT ",\n"
+               "    \"evicted\": %" APR_UINT64_T_FMT ",\n"
+               "    \"full_rejections\": %" APR_UINT64_T_FMT "\n"
+               "  }\n"
                "}\n",
-               live, conns, streams, bytes_in, bytes_out);
+               live, conns, streams, bytes_in, bytes_out,
+               child_h3_io->replay_cache ? "true" : "false",
+               replay.capacity, replay.entries, replay.hits,
+               replay.expired, replay.evicted, replay.rejected_full);
 
     return OK;
 }

@@ -26,6 +26,8 @@
 #include <openssl/err.h>
 #include <openssl/rand.h>
 
+#include <apr_sha1.h>
+
 #include "h3_check.h"
 #include "quic/detail/h3q_impl.h"
 #include "quic/h3q_conn.h"
@@ -227,8 +229,17 @@ static ngtcp2_conn* conn_ref_get_conn(ngtcp2_crypto_conn_ref* conn_ref)
     return ((h3q_conn*)conn_ref->user_data)->qconn;
 }
 
+static int h3q_ticket_generate_cb(SSL* ssl, void* arg);
+static SSL_TICKET_RETURN h3q_ticket_decrypt_cb(SSL* ssl, SSL_SESSION* session,
+                                               const unsigned char* keyname,
+                                               size_t keyname_len,
+                                               SSL_TICKET_STATUS status, void* arg);
+
 static int tls_init(h3q_conn* conn)
 {
+    SSL_CTX_set_session_ticket_cb(conn->engine->ssl_ctx,
+                                  h3q_ticket_generate_cb,
+                                  h3q_ticket_decrypt_cb, NULL);
     if (ngtcp2_crypto_ossl_ctx_new(&conn->ossl_ctx, NULL) != 0 || !(conn->ssl = SSL_new(conn->engine->ssl_ctx)))
     {
         return 0;
@@ -248,6 +259,47 @@ static int tls_init(h3q_conn* conn)
     }
     ngtcp2_conn_set_tls_native_handle(conn->qconn, conn->ossl_ctx);
     return 1;
+}
+
+static int h3q_ticket_generate_cb(SSL* ssl, void* arg H3_UNUSED)
+{
+    unsigned char token[32];
+    SSL_SESSION* session = SSL_get0_session(ssl);
+
+    if (!session || RAND_bytes(token, sizeof(token)) != 1)
+    {
+        return 0;
+    }
+    return SSL_SESSION_set1_ticket_appdata(session, token, sizeof(token));
+}
+
+static SSL_TICKET_RETURN h3q_ticket_decrypt_cb(SSL* ssl, SSL_SESSION* session,
+                                               const unsigned char* keyname H3_UNUSED,
+                                               size_t keyname_len H3_UNUSED,
+                                               SSL_TICKET_STATUS status, void* arg H3_UNUSED)
+{
+    ngtcp2_crypto_conn_ref* ref = SSL_get_app_data(ssl);
+    h3q_conn* conn = ref ? ref->user_data : NULL;
+    void* token = NULL;
+    size_t token_len = 0;
+
+    if ((status == SSL_TICKET_SUCCESS || status == SSL_TICKET_SUCCESS_RENEW)
+        && SSL_SESSION_get0_ticket_appdata(session, &token, &token_len) == 1
+        && conn && token && token_len <= sizeof(conn->ticket_appdata))
+    {
+        memcpy(conn->ticket_appdata, token, token_len);
+        conn->ticket_appdata_len = token_len;
+    }
+
+    if (status == SSL_TICKET_SUCCESS)
+    {
+        return SSL_TICKET_RETURN_USE;
+    }
+    if (status == SSL_TICKET_SUCCESS_RENEW)
+    {
+        return SSL_TICKET_RETURN_USE_RENEW;
+    }
+    return SSL_TICKET_RETURN_IGNORE_RENEW;
 }
 
 h3q_conn* h3q_conn_new(h3q_engine* engine, const ngtcp2_pkt_hd* hd, const ngtcp2_cid* odcid, const ngtcp2_cid* retry_scid, const ngtcp2_path* path)
@@ -467,6 +519,57 @@ int h3q_conn_tls_info(h3q_conn* conn, h3q_tls_info* out)
     out->cipher = SSL_CIPHER_get_name(cipher);
     out->protocol = SSL_get_version(conn->ssl);
     out->resumed = SSL_session_reused(conn->ssl) ? 1u : 0u;
+    return 1;
+}
+
+int h3q_conn_replay_token(h3q_conn* conn, unsigned char* out, size_t out_size)
+{
+    apr_sha1_ctx_t sha1;
+    SSL_SESSION* session;
+    unsigned char material[256];
+    unsigned char random[32];
+    size_t material_len = 0;
+    size_t random_len = 0;
+    unsigned char digest[APR_SHA1_DIGESTSIZE];
+
+    if (!conn || !conn->ssl || !out || out_size < H3Q_REPLAY_TOKEN_LEN)
+    {
+        return 0;
+    }
+
+    session = SSL_get0_session(conn->ssl);
+    if (session)
+    {
+        material_len = SSL_SESSION_get_master_key(session, material, sizeof(material));
+    }
+    if (material_len == 0)
+    {
+        /* Exact packet replays retain the ClientHello random even when the
+         * session secret is not yet exposed at the first early-stream pass. */
+        random_len = SSL_get_client_random(conn->ssl, random, sizeof(random));
+    }
+
+    apr_sha1_init(&sha1);
+    apr_sha1_update_binary(&sha1, conn->engine->secret, sizeof(conn->engine->secret));
+    if (conn->ticket_appdata_len > 0)
+    {
+        apr_sha1_update_binary(&sha1, conn->ticket_appdata, conn->ticket_appdata_len);
+    }
+    if (material_len > 0)
+    {
+        apr_sha1_update_binary(&sha1, material, material_len);
+    }
+    else if (random_len > 0)
+    {
+        apr_sha1_update_binary(&sha1, random, random_len);
+    }
+    else
+    {
+        return 0;
+    }
+    apr_sha1_final(digest, &sha1);
+
+    memcpy(out, digest, H3Q_REPLAY_TOKEN_LEN);
     return 1;
 }
 

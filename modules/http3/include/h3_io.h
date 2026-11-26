@@ -27,6 +27,7 @@
 #include <apr_thread_proc.h>
 
 #include "h3_config.h"
+#include "h3_replay.h"
 #include "h3_session.h"
 #include "h3_socket.h"
 #include "quic/h3q.h"
@@ -56,6 +57,7 @@ typedef struct h3_io_t
 
     apr_array_header_t* pending_handshakes;
     apr_thread_pool_t* h3_worker_pool;
+    h3_replay_cache* replay_cache;
 } h3_io_t;
 
 typedef struct h3_pending_handshake

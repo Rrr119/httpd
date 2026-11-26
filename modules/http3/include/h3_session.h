@@ -85,6 +85,15 @@ struct h3_session
     volatile apr_uint32_t active_tasks;
     volatile apr_uint32_t wake; /* set by a worker that has output for the event thread */
 
+    /* First 0-RTT token decision for this QUIC connection. A replay arrives as
+     * a new connection presenting the same ticket token, so this does not
+     * suppress distinct early streams belonging to one connection. */
+    unsigned early_token_checked : 1;
+    unsigned early_token_known : 1;
+    unsigned early_token_duplicate : 1;
+    unsigned early_token_full : 1;
+    unsigned early_token_unavailable : 1;
+
     struct
     {
         int64_t sid;
@@ -120,6 +129,7 @@ struct h3_stream
 
     int malformed;
     int skip_ngh3_read;
+    int early_reject_status;
 
     int header_count;
     int headers_too_large;

@@ -346,7 +346,12 @@ static void* APR_THREAD_FUNC stream_worker(apr_thread_t* thd, void* data)
 
     ap_log_error(APLOG_MARK, APLOG_INFO, 0, s, "before ap_process_request");
     int access_status;
-    if (r->status != HTTP_OK)
+    if (h3s->early_reject_status)
+    {
+        apr_table_setn(r->err_headers_out, "Retry-After", "0");
+        ap_die(h3s->early_reject_status, r);
+    }
+    else if (r->status != HTTP_OK)
     {
         int err = r->status;
         r->status = HTTP_OK;

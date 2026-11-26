@@ -54,6 +54,10 @@ struct h3_server_conf
     apr_size_t h3_max_window;
     h3_tri_flag h3_session_tickets;
     h3_tri_flag h3_early_data;
+    h3_tri_flag h3_early_data_replay_cache;
+    apr_uint32_t h3_early_replay_window;
+    apr_uint32_t h3_early_replay_cache_size;
+    int h3_early_replay_full_policy;
     apr_uint32_t h3_stream_timeout;
     apr_uint32_t h3_max_stream_errors;
     int h3_qpack_capacity_set;

@@ -102,6 +102,8 @@ struct h3q_conn
     h3q_conn* next;
     h3q_conn* next_accept;
     uint64_t max_remote_bidi; /* MAX_STREAMS given to the peer; 0 until first raised */
+    unsigned char ticket_appdata[32];
+    size_t ticket_appdata_len;
     unsigned handshake_done : 1;
     unsigned closed : 1;
     unsigned queued_accept : 1;

@@ -597,7 +597,8 @@ SET(mod_http3_main_source            modules/http3/mod_http3.c)
 SET(mod_http3_extra_sources
   modules/http3/h3_callbacks.c     modules/http3/h3_config.c
   modules/http3/h3_filter.c        modules/http3/h3_hooks.c
-  modules/http3/h3_io.c            modules/http3/h3_request.c
+  modules/http3/h3_io.c            modules/http3/h3_replay.c
+  modules/http3/h3_request.c
   modules/http3/h3_server.c        modules/http3/h3_session.c
   modules/http3/h3_socket.c        modules/http3/h3_socket_os.c
   modules/http3/h3_socket_bpf.c

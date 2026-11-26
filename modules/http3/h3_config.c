@@ -33,6 +33,7 @@
 #include "h3_check.h"
 #include "h3_config.h"
 #include "h3_os.h"
+#include "h3_replay.h"
 #include "h3_request.h"
 #include "h3_server.h"
 #include "mod_http3.h"
@@ -76,6 +77,10 @@ void* h3_merge_server_config(apr_pool_t* p, void* base_conf, void* new_conf)
     merged->h3_max_window = new->h3_max_window ? new->h3_max_window : base->h3_max_window;
     merged->h3_session_tickets = new->h3_session_tickets != H3_FLAG_UNSET ? new->h3_session_tickets : base->h3_session_tickets;
     merged->h3_early_data = new->h3_early_data != H3_FLAG_UNSET ? new->h3_early_data : base->h3_early_data;
+    merged->h3_early_data_replay_cache = new->h3_early_data_replay_cache != H3_FLAG_UNSET ? new->h3_early_data_replay_cache : base->h3_early_data_replay_cache;
+    merged->h3_early_replay_window = new->h3_early_replay_window ? new->h3_early_replay_window : base->h3_early_replay_window;
+    merged->h3_early_replay_cache_size = new->h3_early_replay_cache_size ? new->h3_early_replay_cache_size : base->h3_early_replay_cache_size;
+    merged->h3_early_replay_full_policy = new->h3_early_replay_full_policy ? new->h3_early_replay_full_policy : base->h3_early_replay_full_policy;
     merged->h3_stream_timeout = new->h3_stream_timeout ? new->h3_stream_timeout : base->h3_stream_timeout;
     merged->h3_max_stream_errors = new->h3_max_stream_errors ? new->h3_max_stream_errors : base->h3_max_stream_errors;
     merged->h3_qpack_capacity_set = new->h3_qpack_capacity_set ? new->h3_qpack_capacity_set : base->h3_qpack_capacity_set;
@@ -549,6 +554,115 @@ static const char* set_h3_early_data(cmd_parms* cmd, void* dummy H3_UNUSED, int 
     return NULL;
 }
 
+static const char* set_h3_early_data_replay_cache(cmd_parms* cmd, void* dummy H3_UNUSED, const char* arg)
+{
+    h3_server_conf* conf = ap_get_module_config(cmd->server->module_config, &http3_module);
+    CHECK(conf);
+
+    if (!arg || !*arg || !ap_cstr_casecmp(arg, "on"))
+    {
+        conf->h3_early_data_replay_cache = H3_FLAG_ON;
+        return NULL;
+    }
+    if (!ap_cstr_casecmp(arg, "off"))
+    {
+        conf->h3_early_data_replay_cache = H3_FLAG_OFF;
+        return NULL;
+    }
+
+    apr_uint64_t val = 0;
+    apr_status_t rv = apr_cstr_atoui64(&val, arg);
+    if (rv == APR_EINVAL)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' must be On, Off or a cache size", cmd->cmd->name, arg);
+    }
+    if (rv == APR_ERANGE || val == 0 || val > H3_EARLY_REPLAY_CACHE_SIZE_MAX)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is out of allowed range (1-%u)", cmd->cmd->name, arg,
+                            (unsigned)H3_EARLY_REPLAY_CACHE_SIZE_MAX);
+    }
+    conf->h3_early_data_replay_cache = H3_FLAG_ON;
+    conf->h3_early_replay_cache_size = (apr_uint32_t)val;
+    return NULL;
+}
+
+static const char* set_h3_early_replay_cache_size(cmd_parms* cmd, void* dummy H3_UNUSED, const char* arg)
+{
+    if (!arg || !*arg)
+    {
+        return apr_psprintf(cmd->pool, "%s: empty value", cmd->cmd->name);
+    }
+    apr_uint64_t val = 0;
+    apr_status_t rv = apr_cstr_atoui64(&val, arg);
+    if (rv == APR_EINVAL)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is not a number", cmd->cmd->name, arg);
+    }
+    if (rv == APR_ERANGE)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is out of representable range", cmd->cmd->name, arg);
+    }
+    if (val == 0 || val > H3_EARLY_REPLAY_CACHE_SIZE_MAX)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is out of allowed range (1-%u)", cmd->cmd->name, arg,
+                            (unsigned)H3_EARLY_REPLAY_CACHE_SIZE_MAX);
+    }
+    h3_server_conf* conf = ap_get_module_config(cmd->server->module_config, &http3_module);
+    CHECK(conf);
+    conf->h3_early_replay_cache_size = (apr_uint32_t)val;
+    conf->h3_early_data_replay_cache = H3_FLAG_ON;
+    return NULL;
+}
+
+static const char* set_h3_early_replay_window(cmd_parms* cmd, void* dummy H3_UNUSED, const char* arg)
+{
+    if (!arg || !*arg)
+    {
+        return apr_psprintf(cmd->pool, "%s: empty value", cmd->cmd->name);
+    }
+    apr_uint64_t val = 0;
+    apr_status_t rv = apr_cstr_atoui64(&val, arg);
+    if (rv == APR_EINVAL)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is not a number", cmd->cmd->name, arg);
+    }
+    if (rv == APR_ERANGE)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is out of representable range", cmd->cmd->name, arg);
+    }
+    if (val == 0 || val > H3_EARLY_REPLAY_WINDOW_MAX)
+    {
+        return apr_psprintf(cmd->pool, "%s: '%s' is out of allowed range (1-%u)", cmd->cmd->name, arg,
+                            (unsigned)H3_EARLY_REPLAY_WINDOW_MAX);
+    }
+    h3_server_conf* conf = ap_get_module_config(cmd->server->module_config, &http3_module);
+    CHECK(conf);
+    conf->h3_early_replay_window = (apr_uint32_t)val;
+    return NULL;
+}
+
+static const char* set_h3_early_replay_full_policy(cmd_parms* cmd, void* dummy H3_UNUSED, const char* arg)
+{
+    h3_server_conf* conf = ap_get_module_config(cmd->server->module_config, &http3_module);
+    CHECK(conf);
+
+    if (arg && (!ap_cstr_casecmp(arg, "evict") || !ap_cstr_casecmp(arg, "evict-oldest")
+                || !ap_cstr_casecmp(arg, "lru") || !ap_cstr_casecmp(arg, "drop-oldest")))
+    {
+        conf->h3_early_replay_full_policy = H3_EARLY_REPLAY_FULL_EVICT;
+        return NULL;
+    }
+    if (arg && (!ap_cstr_casecmp(arg, "reject") || !ap_cstr_casecmp(arg, "reject-early")
+                || !ap_cstr_casecmp(arg, "fail-closed")))
+    {
+        conf->h3_early_replay_full_policy = H3_EARLY_REPLAY_FULL_REJECT;
+        return NULL;
+    }
+    return apr_psprintf(cmd->pool,
+                        "%s: '%s' is not valid; use evict-oldest or reject-early",
+                        cmd->cmd->name, arg ? arg : "");
+}
+
 static const char* set_h3_alt_svc(cmd_parms* cmd, void* dummy H3_UNUSED, int flag)
 {
     h3_server_conf* conf = ap_get_module_config(cmd->server->module_config, &http3_module);
@@ -764,6 +878,22 @@ int h3_post_config(apr_pool_t* p, apr_pool_t* plog H3_UNUSED, apr_pool_t* ptemp,
             {
                 vc->h3_early_data = H3_FLAG_OFF;
             }
+            if (vc->h3_early_data_replay_cache == H3_FLAG_UNSET)
+            {
+                vc->h3_early_data_replay_cache = H3_FLAG_ON;
+            }
+            if (vc->h3_early_replay_window == 0)
+            {
+                vc->h3_early_replay_window = H3_EARLY_REPLAY_WINDOW_DEFAULT;
+            }
+            if (vc->h3_early_replay_cache_size == 0)
+            {
+                vc->h3_early_replay_cache_size = H3_EARLY_REPLAY_CACHE_SIZE_DEFAULT;
+            }
+            if (vc->h3_early_replay_full_policy == 0)
+            {
+                vc->h3_early_replay_full_policy = H3_EARLY_REPLAY_FULL_EVICT;
+            }
             if (vc->h3_alt_svc_max_age == 0)
             {
                 vc->h3_alt_svc_max_age = H3_ALT_SVC_MAX_AGE_DEFAULT;
@@ -826,6 +956,40 @@ const command_rec h3_cmds[] = {
     AP_INIT_TAKE1("H3MaxWindow", set_h3_max_window, NULL, RSRC_CONF, "Largest flow-control window, per connection and per stream, that autotuning may grow a client upload window to (default: 6291456)"),
     AP_INIT_FLAG("H3SessionTickets", set_h3_session_tickets, NULL, RSRC_CONF, "Whether to issue TLS session tickets so returning clients can resume instead of running a full handshake (default: on)"),
     AP_INIT_FLAG("H3EarlyData", set_h3_early_data, NULL, RSRC_CONF, "Whether to accept 0-RTT request data on resumed connections; unsafe methods wait for the handshake (default: off)"),
+    AP_INIT_TAKE1("H3EarlyDataReplayCache", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "On/Off or maximum number of 0-RTT tokens remembered for replay detection (default: on, 4096)"),
+    AP_INIT_TAKE1("H3EarlyDataReplayProtection", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H3EarlyDataTokenCache", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H3EarlyDataReplayCacheSize", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Maximum number of 0-RTT tokens remembered by the replay cache (default: 4096)"),
+    AP_INIT_TAKE1("H3EarlyDataTokenCacheSize", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3EarlyDataReplayCacheCapacity", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3EarlyDataReplayCacheMaxEntries", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3EarlyDataReplayMaxTokens", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3EarlyDataReplayWindow", set_h3_early_replay_window, NULL, RSRC_CONF, "Seconds a 0-RTT token remains replayable and therefore must remain deduplicated (default: 300)"),
+    AP_INIT_TAKE1("H3EarlyDataTokenWindow", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3EarlyDataReplayWindowSeconds", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3EarlyDataReplayTTL", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3EarlyDataReplayMaxAge", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3EarlyDataReplayCacheFull", set_h3_early_replay_full_policy, NULL, RSRC_CONF, "Behavior at capacity: evict-oldest or reject-early (default: evict-oldest)"),
+    AP_INIT_TAKE1("H3EarlyDataReplayFullPolicy", set_h3_early_replay_full_policy, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheFull"),
+    AP_INIT_TAKE1("H3ReplayCache", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H3ReplayProtection", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H3ReplayCacheSize", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3ReplayCacheCapacity", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3ReplayCacheMaxEntries", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3ReplayWindow", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3ReplayWindowSeconds", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3ReplayTTL", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H3ReplayCacheFull", set_h3_early_replay_full_policy, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheFull"),
+    AP_INIT_TAKE1("H3ReplayFullPolicy", set_h3_early_replay_full_policy, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheFull"),
+    AP_INIT_TAKE1("H3ZeroRTTReplayCache", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H3ZeroRTTReplayCacheSize", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H3ZeroRTTReplayWindow", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H30RTTReplayCache", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H30RttReplayCache", set_h3_early_data_replay_cache, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCache"),
+    AP_INIT_TAKE1("H30RTTReplayCacheSize", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H30RttReplayCacheSize", set_h3_early_replay_cache_size, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayCacheSize"),
+    AP_INIT_TAKE1("H30RTTReplayWindow", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
+    AP_INIT_TAKE1("H30RttReplayWindow", set_h3_early_replay_window, NULL, RSRC_CONF, "Alias for H3EarlyDataReplayWindow"),
     AP_INIT_TAKE1("H3StreamTimeout", set_h3_stream_timeout, NULL, RSRC_CONF, "Seconds a response may make no progress before the stream is aborted (default: the server Timeout)"),
     AP_INIT_TAKE1("H3MaxStreamErrors", set_h3_max_stream_errors, NULL, RSRC_CONF, "Stream errors one connection may cause before it is closed with H3_EXCESSIVE_LOAD (default: 8)"),
     AP_INIT_TAKE1("H3QpackTableCapacity", set_h3_qpack_table_capacity, NULL, RSRC_CONF, "Bytes of QPACK dynamic table a client may use for request headers; 0 disables it (default: 4096)"),

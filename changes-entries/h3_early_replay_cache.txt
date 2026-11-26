@@ -1,0 +1,4 @@
+  *) mod_http3: Reject replayed HTTP/3 0-RTT requests with 425 when H3EarlyData
+     is enabled; new H3EarlyDataReplay* directives bound the token cache,
+     time window, and capacity behavior.
+     [Rrr119]

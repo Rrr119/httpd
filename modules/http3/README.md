@@ -98,6 +98,11 @@ Browsers caching this header will switch to HTTP/3 over QUIC on subsequent reque
 | `H3StreamTimeout` | *Server Timeout* | `server config`, `virtual host` | Timeout in seconds without progress before aborting a stream. |
 | `H3AddressValidation` | `on` | `server config` | Validate client addresses using QUIC Retry packets before accept. |
 | `H3SessionTickets` | `on` | `server config` | Issue TLS 1.3 session tickets for 0-RTT/fast connection resumption. |
+| `H3EarlyData` | `off` | `server config` | Accept HTTP/3 0-RTT requests; unsafe methods still wait for handshake completion. |
+| `H3EarlyDataReplayCache` | `on` | `server config` | Deduplicate 0-RTT resumption tokens inside the replay window when `H3EarlyData` is on. |
+| `H3EarlyDataReplayCacheSize` | `4096` | `server config` | Maximum number of token entries; fixed memory and hash table are allocated at child start. |
+| `H3EarlyDataReplayWindow` | `300` | `server config` | Seconds a token is remembered. Set this to at least the TLS ticket lifetime plus allowed clock skew. |
+| `H3EarlyDataReplayCacheFull` | `evict-oldest` | `server config` | At capacity, evict the oldest token, or reject new early data with `503` until an entry expires. |
 | `H3SocketBufferSize` | `2097152` (2MB) | `server config` | Socket send and receive buffer sizes for the UDP listener. |
 | `H3MaxStreamErrors` | `8` | `server config`, `virtual host` | Stream errors allowed before terminating connection with `H3_EXCESSIVE_LOAD`. |
 | `H3QpackTableCapacity` | `4096` | `server config`, `virtual host` | QPACK dynamic table capacity in bytes (`0` disables dynamic table). |
@@ -105,6 +110,41 @@ Browsers caching this header will switch to HTTP/3 over QUIC on subsequent reque
 | `H3MinWorkers` | `16` | `server config` | Minimum request worker threads per child process. |
 | `H3MaxWorkers` | `64` | `server config` | Maximum request worker threads per child process. |
 | `H3MaxWorkerIdleSeconds`| `600` | `server config` | Seconds an idle worker thread is kept before termination. |
+
+---
+
+## 0-RTT Replay Protection
+
+Enable early data with:
+
+```apache
+H3EarlyData On
+H3EarlyDataReplayCacheSize 4096
+H3EarlyDataReplayWindow 300
+```
+
+The first completed early request for a resumed TLS ticket records a
+server-keyed token. A second HTTP/3 connection presenting the same ticket
+token inside the time window is not processed by request hooks or a handler;
+mod_http3 returns `425 Too Early` with `Retry-After: 0`. Distinct tickets and
+ordinary 1-RTT requests are unaffected. Unsafe methods still wait for the
+handshake as required by RFC 8470.
+
+The cache is fixed-size per child process. Its hash table and entry array are
+allocated once, so `H3EarlyDataReplayCacheSize` is the hard memory bound.
+Expired entries are reclaimed before new entries are inserted. When the table
+is full:
+
+- `H3EarlyDataReplayCacheFull evict-oldest` (default) removes the oldest
+  token. A replay of that evicted token is no longer recognized and may be
+  accepted again; the `evicted` counter in `http3-status` makes this visible.
+- `H3EarlyDataReplayCacheFull reject-early` fails closed: new tokens do not
+  evict unexpired state, and additional early requests receive `503` until an
+  entry expires. Clients can retry those requests after the handshake.
+
+The cache is local to the child that owns the QUIC socket/bucket. The
+connection-ID router keeps replayed connections on the same bucket in the
+normal multi-bucket deployment.
 
 ---
 

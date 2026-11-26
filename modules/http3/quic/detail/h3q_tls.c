@@ -122,7 +122,6 @@ SSL_CTX* h3q_tls_ctx_create(const char* const* cert_files, size_t ncerts, const 
 
     static const unsigned char sid_ctx[] = "mod_http3";
     SSL_CTX_set_session_id_context(ssl_ctx, sid_ctx, sizeof(sid_ctx) - 1);
-
     /* H3EarlyData is per connection: SSL_set_quic_tls_early_data_enabled makes a
      * ticket advertise 0-RTT (0xffffffff, RFC 9001 4.6.1), so a ticket issued
      * with it off invites none. OpenSSL's anti-replay is built for TLS over TCP

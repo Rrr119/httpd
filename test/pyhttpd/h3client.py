@@ -219,6 +219,21 @@ class H3Client:
         """Several requests on one connection; each a dict of request() args."""
         return asyncio.run(self._run([self._req(**r) for r in reqs], sequential))
 
+    async def _run_early(self, reqs):
+        async with connect("127.0.0.1", self.port, configuration=self._config(),
+                           create_protocol=_Protocol,
+                           session_ticket_handler=self.received_tickets.append,
+                           wait_connected=False) as proto:
+            futures = []
+            for request in reqs:
+                request.pop("delay", None)
+                futures.append(proto.send_request(**request))
+            return await asyncio.wait_for(asyncio.gather(*futures), self.timeout)
+
+    def requests_early(self, reqs: List[dict]) -> List[H3Response]:
+        """Send requests before handshake completion, as TLS early data."""
+        return asyncio.run(self._run_early([self._req(**r) for r in reqs]))
+
     def request(self, method="GET", path="/", headers=None, body=None,
                 authority=None) -> H3Response:
         return self.requests([dict(method=method, path=path, headers=headers,

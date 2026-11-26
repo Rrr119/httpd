@@ -41,6 +41,15 @@ typedef struct h3q_tls_info
 int h3q_conn_tls_info(h3q_conn* conn, h3q_tls_info* out);
 
 /**
+ * Return an opaque, server-keyed replay token for the resumption/PSK used by
+ * this connection. The output is always H3Q_REPLAY_TOKEN_LEN bytes on success.
+ * It must be treated as sensitive and used only as a cache lookup key.
+ * @return 1 when @p out was filled, 0 when no stable token is available.
+ */
+#define H3Q_REPLAY_TOKEN_LEN 20
+int h3q_conn_replay_token(h3q_conn* conn, unsigned char* out, size_t out_size);
+
+/**
  * Set the pointer the engine hands to the stream_acked callback.
  * @param conn Connection to label; NULL is ignored.
  * @param user Caller context; acknowledgements are dropped while it is NULL.

@@ -139,6 +139,30 @@ apr_status_t h3_io_listen_start(apr_pool_t* pchild, server_rec* s, h3_server_con
     }
     apr_thread_pool_idle_wait_set(io->h3_worker_pool, apr_time_from_sec(conf->h3_max_worker_idle_seconds));
 
+    if (conf->h3_early_data == H3_FLAG_ON
+        && conf->h3_early_data_replay_cache != H3_FLAG_OFF)
+    {
+        h3_replay_full_policy policy =
+            conf->h3_early_replay_full_policy == H3_EARLY_REPLAY_FULL_REJECT
+                ? H3_REPLAY_FULL_REJECT_EARLY
+                : H3_REPLAY_FULL_EVICT_OLDEST;
+        apr_status_t replay_rv = h3_replay_cache_create(
+            &io->replay_cache, pchild, conf->h3_early_replay_cache_size,
+            apr_time_from_sec(conf->h3_early_replay_window), policy);
+        if (replay_rv != APR_SUCCESS)
+        {
+            ap_log_error(APLOG_MARK, APLOG_ERR, replay_rv, s,
+                         "H3EarlyData: could not create replay cache");
+            teardown(io);
+            return APR_EGENERAL;
+        }
+        ap_log_error(APLOG_MARK, APLOG_INFO, 0, s,
+                     "H3EarlyData replay cache: capacity=%u tokens window=%u seconds full-policy=%s",
+                     (unsigned)conf->h3_early_replay_cache_size,
+                     (unsigned)conf->h3_early_replay_window,
+                     policy == H3_REPLAY_FULL_REJECT_EARLY ? "reject-early" : "evict-oldest");
+    }
+
     char qerr[H3Q_ERRLEN] = {0};
     int bucket = h3_server_route_bucket(s);
     h3q_config qcfg = {
@@ -440,6 +464,63 @@ static void abandon_stalled_responses(h3_session* session, apr_interval_time_t s
     }
 }
 
+static int early_data_replay_status(h3_io_t* io, h3_session* session)
+{
+    server_rec* s = session->s;
+    unsigned char token[H3Q_REPLAY_TOKEN_LEN];
+    h3_replay_seen_result seen;
+
+    if (session->early_token_checked)
+    {
+        if (session->early_token_duplicate)
+        {
+            return HTTP_TOO_EARLY;
+        }
+        if (session->early_token_full)
+        {
+            return HTTP_SERVICE_UNAVAILABLE;
+        }
+        if (session->early_token_unavailable)
+        {
+            return HTTP_TOO_EARLY;
+        }
+        return 0;
+    }
+    session->early_token_checked = 1;
+
+    if (!io->replay_cache)
+    {
+        session->early_token_known = 1;
+        return 0;
+    }
+    if (!h3q_conn_replay_token(session->qconn, token, sizeof(token)))
+    {
+        session->early_token_unavailable = 1;
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, s,
+                     "H3EarlyData: no stable replay token; asking client to retry after the handshake");
+        return HTTP_TOO_EARLY;
+    }
+
+    seen = h3_replay_cache_see(io->replay_cache, token, sizeof(token), apr_time_now());
+    if (seen == H3_REPLAY_SEEN_DUPLICATE)
+    {
+        session->early_token_duplicate = 1;
+        ap_log_error(APLOG_MARK, APLOG_WARNING, 0, s,
+                     "H3EarlyData: rejected a replayed 0-RTT token within its time window");
+        return HTTP_TOO_EARLY;
+    }
+    if (seen == H3_REPLAY_SEEN_FULL)
+    {
+        session->early_token_full = 1;
+        ap_log_error(APLOG_MARK, APLOG_ERR, 0, s,
+                     "H3EarlyData replay cache is full and configured to reject new early data");
+        return HTTP_SERVICE_UNAVAILABLE;
+    }
+
+    session->early_token_known = 1;
+    return 0;
+}
+
 int service_session_pass(h3_io_t* io, h3_session* session)
 {
     CHECK(io);
@@ -555,8 +636,17 @@ int service_session_pass(h3_io_t* io, h3_session* session)
     for (int i = 0; i < completed->nelts; i++)
     {
         h3_stream* h3s = ((h3_stream**)completed->elts)[i];
+        int is_early = h3s->qstream && h3q_stream_is_early(h3s->qstream);
         /* 0-RTT data can be a replay: unsafe methods wait for the handshake (RFC 8470 section 3). */
-        if (h3s->qstream && h3q_stream_is_early(h3s->qstream) && !h3q_conn_is_handshake_done(conn) && !h3_method_is_safe(h3s->method))
+        if (is_early)
+        {
+            int replay_status = early_data_replay_status(io, session);
+            if (replay_status)
+            {
+                h3s->early_reject_status = replay_status;
+            }
+        }
+        if (!h3s->early_reject_status && is_early && !h3q_conn_is_handshake_done(conn) && !h3_method_is_safe(h3s->method))
         {
             continue;
         }

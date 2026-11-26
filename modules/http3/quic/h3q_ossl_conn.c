@@ -59,6 +59,14 @@ int h3q_conn_has_early_data(h3q_conn* conn)
     return 0;
 }
 
+int h3q_conn_replay_token(h3q_conn* conn, unsigned char* out, size_t out_size)
+{
+    (void)conn;
+    (void)out;
+    (void)out_size;
+    return 0;
+}
+
 /* OpenSSL manages the peer's stream credit itself and does not report it. */
 uint64_t h3q_conn_max_remote_streams_bidi(h3q_conn* conn)
 {
